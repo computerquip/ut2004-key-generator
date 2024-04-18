@@ -107,11 +107,7 @@ std::string GenerateCDKey(uint64_t Seed, std::string_view Magic)
     }
 
     std::string Check = std::format("{}{}", *(int64_t*)&Seed, Magic);
-
-    /* FIXME This is lazy and feels wrong but it's what the exe does essentially.
-     * I'm not sure if this part of the original algorithm... seems to work? */
     MD5 Digest = DigestMD5((unsigned char*)Check.data(), Check.size());
-
     uint64_t QDigest = *(uint64_t*)Digest.data();
     std::string CheckOutput = ValuesToCDKeyMap(ulltoa(QDigest, GCDKeyBase));
 
