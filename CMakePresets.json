@@ -7,30 +7,68 @@
     },
     "configurePresets": [
       {
-        "name": "default",
-        "displayName": "Default Config",
-        "description": "Default build using Ninja generator",
+        "name": "base",
+        "hidden": true,
         "generator": "Ninja Multi-Config",
-        "binaryDir": "${sourceDir}/build/default"
+        "binaryDir": "${sourceDir}/build/ninja-multi",
+        "cacheVariables": {
+          "WIL_BUILD_TESTS": "OFF",
+          "WIL_BUILD_PACKAGING": "OFF"
+        }
+      },
+      {
+        "name": "debug",
+        "inherits": "base",
+        "displayName": "Debug",
+        "cacheVariables": {
+          "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreadedDebug"
+        }
+      },
+      {
+        "name": "release",
+        "inherits": "base",
+        "displayName": "Release",
+        "cacheVariables": {
+          "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded"
+        }
       }
     ],
     "buildPresets": [
       {
-        "name": "default",
-        "configurePreset": "default"
+        "name": "debug",
+        "configuration": "Debug",
+        "configurePreset": "debug"
+      },
+      {
+        "name": "release",
+        "configuration": "Release",
+        "configurePreset": "release"
       }
     ],
     "workflowPresets": [
       {
-        "name": "default",
+        "name": "debug",
         "steps": [
           {
             "type": "configure",
-            "name": "default"
+            "name": "debug"
           },
           {
             "type": "build",
-            "name": "default"
+            "name": "debug"
+          }
+        ]
+      },
+      {
+        "name": "release",
+        "steps": [
+          {
+            "type": "configure",
+            "name": "release"
+          },
+          {
+            "type": "build",
+            "name": "release"
           }
         ]
       }

@@ -2,147 +2,189 @@
 #include <cinttypes>
 #include <codecvt>
 #include <cstdint>
-#include <format>
+#include <cstdio>
 #include <locale>
-#include <print>
 #include <string_view>
 #include <string>
 #include <vector>
 
-#include "wil/result.h"
-#include "wil/resource.h"
+#if _WIN32
+# include <wil/result.h>
+# include <wil/resource.h>
+#endif
 
-std::string_view GMagic = "appDebugfNoInit";
-std::string_view GCDKeyBaseMap = "ABCDEFGHJLKMNPQRTUVWXYZ2346789";
-unsigned int GCDKeyBase = (unsigned int)GCDKeyBaseMap.size();
+namespace
+{
+
+constexpr const char* GMagic = "appDebugfNoInit";
+constexpr std::string_view GCDKeyBaseMap = "ABCDEFGHJLKMNPQRTUVWXYZ2346789";
+constexpr unsigned int GCDKeyBase = (unsigned int)GCDKeyBaseMap.size();
 
 using MD5 = std::array<unsigned char, 16>;
 
-std::vector<unsigned char> GenerateRandom(size_t NumBytes)
+#if _WIN32
+
+void GenerateRandom(unsigned char* Buffer, size_t NumBytes)
 {
-    std::vector<unsigned char> Result;
-
-    Result.resize(NumBytes);
-
-    THROW_IF_NTSTATUS_FAILED(
-        ::BCryptGenRandom(BCRYPT_RNG_ALG_HANDLE, Result.data(), NumBytes, 0));
-
-    return Result;
+	THROW_IF_NTSTATUS_FAILED(::BCryptGenRandom(
+		NULL,
+		Buffer,
+		NumBytes,
+		BCRYPT_USE_SYSTEM_PREFERRED_RNG));
 }
 
-MD5 DigestMD5(unsigned char *Data, size_t Size)
+MD5 DigestMD5(unsigned char* Data, size_t Size)
 {
-    DWORD cbHashObject{};
-    DWORD cbDummy{};
-    MD5 Digest{};
+	DWORD cbHashObject{};
+	DWORD cbDummy{};
+	MD5 Digest{};
 
-    THROW_IF_NTSTATUS_FAILED(::BCryptGetProperty(
-        BCRYPT_MD5_ALG_HANDLE,
-        BCRYPT_OBJECT_LENGTH,
-        (PUCHAR)&cbHashObject,
-        sizeof(cbHashObject),
-        &cbDummy,
-        0));
+	THROW_IF_NTSTATUS_FAILED(::BCryptGetProperty(
+		BCRYPT_MD5_ALG_HANDLE,
+		BCRYPT_OBJECT_LENGTH,
+		(PUCHAR)&cbHashObject,
+		sizeof(cbHashObject),
+		&cbDummy,
+		0));
 
-    std::vector<unsigned char> HashObject(cbHashObject);
-    wil::unique_bcrypt_hash Hash{};
+	std::vector<unsigned char> HashObject(cbHashObject);
+	wil::unique_bcrypt_hash Hash{};
 
-    THROW_IF_NTSTATUS_FAILED(::BCryptCreateHash(
-        BCRYPT_MD5_ALG_HANDLE,
-        Hash.addressof(),
-        HashObject.data(),
-        HashObject.size(),
-        NULL,
-        0,
-        0));
+	THROW_IF_NTSTATUS_FAILED(::BCryptCreateHash(
+		BCRYPT_MD5_ALG_HANDLE,
+		Hash.addressof(),
+		HashObject.data(),
+		HashObject.size(),
+		NULL,
+		0,
+		0));
 
-    THROW_IF_NTSTATUS_FAILED(::BCryptHashData(Hash.get(), Data, Size, 0));
+	THROW_IF_NTSTATUS_FAILED(::BCryptHashData(Hash.get(), Data, Size, 0));
+	THROW_IF_NTSTATUS_FAILED(::BCryptFinishHash(Hash.get(), Digest.data(), Digest.size(), 0));
 
-    THROW_IF_NTSTATUS_FAILED(::BCryptFinishHash(Hash.get(), Digest.data(), Digest.size(), 0));
-
-    return Digest;
+	return Digest;
 }
 
-std::string ulltoa(uint64_t Num, unsigned int Base = 10)
-{
-    char Buffer[100]{};
+#endif
 
-    return _ui64toa(Num, Buffer, Base);
+/* Based on the ui64toa implementation in WINE
+ * https://github.com/wine-mirror/wine/blob/master/LICENSE */
+std::string ui64toa(uint64_t value, int radix)
+{
+	char buffer[65], * pos;
+
+	pos = &buffer[64];
+	*pos = '\0';
+
+	do {
+		int digit = value % radix;
+		value /= radix;
+
+		if (digit < 10) {
+			*--pos = '0' + digit;
+		}
+		else {
+			*--pos = 'a' + digit - 10;
+		}
+	} while (value != 0);
+
+	return pos;
 }
 
-char ValueToCDKeyMap(char C)
+uint64_t BufferToULL(const unsigned char* Source)
 {
-    if (C >= '0' && C <='9') {
-        return GCDKeyBaseMap[C - '0'];
-    }
+	uint64_t Result{};
 
-    if (C >= 'A' && C <='Z') {
-        return GCDKeyBaseMap[C - 'A' + 10];
-    }
+	memcpy(&Result, Source, 8);
 
-    if (C >= 'a' && C <='z') {
-        return GCDKeyBaseMap[C - 'a' + 10];
-    }
-
-    return 0;
+	return Result;
 }
 
-std::string ValuesToCDKeyMap(std::string_view Values)
+std::string Scramble(std::string_view View)
 {
-    std::string Result;
+	std::string Result;
 
-    for (char Value : Values) {
-        Result.append(1, ValueToCDKeyMap(Value));
-    }
+	for (const char C : View) {
+		if (C >= '0' && C <= '9') {
+			Result.push_back(GCDKeyBaseMap[C - '0']);
+		}
 
-    return Result;
+		if (C >= 'A' && C <= 'Z') {
+			Result.push_back(GCDKeyBaseMap[C - 'A' + 10]);
+		}
+
+		if (C >= 'a' && C <= 'z') {
+			Result.push_back(GCDKeyBaseMap[C - 'a' + 10]);
+		}
+	}
+
+	return Result;
 }
 
-std::string GenerateCDKey(uint64_t Seed, std::string_view Magic)
+void EnsureLength(std::string& Str, size_t WantedSize, char Pad)
 {
-    std::string Key = ValuesToCDKeyMap(ulltoa(Seed, GCDKeyBase));
+	if (Str.size() < WantedSize) {
+		Str.insert(0, WantedSize - Str.size(), Pad);
 
-    if (Key.size() < 14) {
-        Key.insert(0, 14 - Key.size(), GCDKeyBaseMap[0]);
-    }
+	}
 
-    std::string Check = std::format("{}{}", *(int64_t*)&Seed, Magic);
-    MD5 Digest = DigestMD5((unsigned char*)Check.data(), Check.size());
-    uint64_t QDigest = *(uint64_t*)Digest.data();
-    std::string CheckOutput = ValuesToCDKeyMap(ulltoa(QDigest, GCDKeyBase));
-
-    CheckOutput.resize(6);
-
-    if(CheckOutput.size() < 6) {
-        CheckOutput.insert(0, 6 - CheckOutput.size(), GCDKeyBaseMap[0]);
-    }
-
-    Key.append(CheckOutput);
-
-    std::string_view KeyView = Key;
-
-    return std::format(
-        "{}-{}-{}-{}",
-        KeyView.substr(10, 5),
-        KeyView.substr(5, 5),
-        KeyView.substr(0, 5),
-        KeyView.substr(15, 5));
+	Str.resize(WantedSize);
 }
 
-int main()
+template<typename ... ArgsT>
+std::string Format(const std::string& FormatStr, ArgsT ... Args)
 {
-    std::vector<unsigned char> Bytes = GenerateRandom(8);
-    uint64_t Seed = *(uint64_t*)Bytes.data();
+	std::string Result;
+	int Length = std::snprintf(nullptr, 0, FormatStr.c_str(), Args ...);
 
-    try {
-        std::string Key = GenerateCDKey(Seed, GMagic);
-        std::print(stderr, "Seed: {}\n", Seed);
-        std::print(stdout, "{}", Key);
+	/* snprintf can't realistically fail here, don't check for errors. */
+	Result.resize(Length);
+	std::snprintf(Result.data(), Result.size() + 1, FormatStr.c_str(), Args ...);
 
-        return 0;
-    } catch (...) {
-        LOG_CAUGHT_EXCEPTION();
-    }
+	return Result;
+}
 
-    return 1;
+std::string GenerateCDKey(uint64_t Seed, const char* Magic)
+{
+	std::string SeedStr = ui64toa(Seed, GCDKeyBase);
+	std::string Key = Scramble(ui64toa(Seed, GCDKeyBase));
+
+	EnsureLength(Key, 14, GCDKeyBaseMap[0]);
+
+	std::string Check = Format("%" PRIi64 "%s", Seed, Magic);
+	MD5 Digest = DigestMD5((unsigned char*)Check.data(), Check.size());
+	uint64_t QDigest = BufferToULL(Digest.data());
+	std::string CheckOutput = Scramble(ui64toa(QDigest, GCDKeyBase));
+
+	EnsureLength(CheckOutput, 6, GCDKeyBaseMap[0]);
+
+	Key.append(CheckOutput);
+
+	return Format("%.*s-%.*s-%.*s-%.*s",
+		5, Key.data() + 10,
+		5, Key.data() + 5,
+		5, Key.data() + 0,
+		5, Key.data() + 15);
+}
+
+} /* <anonymous> namespace */
+
+int main() try
+{
+	uint64_t Seed{};
+
+	GenerateRandom((unsigned char*)&Seed, sizeof(Seed));
+
+	std::string Key = GenerateCDKey(Seed, GMagic);
+	fprintf(stdout, "%s", Key.c_str());
+
+	return 0;
+}
+catch (const std::exception& e)
+{
+	std::string what = e.what();
+
+	fprintf(stderr, "%s", what.c_str());
+
+	return 1;
 }
